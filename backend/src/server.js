@@ -1107,9 +1107,102 @@ app.post("/internal/trigger-analysis", requireInternalSecret, asyncHandler(async
 
 let missionRunning = false;
 
+const MISSION_AGENT_LABELS = {
+  ORCHESTRATOR: "conductor",
+  COST: "cost_agent",
+  PERF: "perf_agent",
+  CHARGEBACK: "chargeback_agent"
+};
+
+function formatMissionStep(step) {
+  const content = String(step.content || "");
+  if (step.stepType === "TOOL_CALL") {
+    return `tool call: ${step.toolName}(${content.slice(0, 180)})`;
+  }
+  if (step.stepType === "TOOL_RESULT") {
+    return `${step.toolName}: ${content.slice(0, 240)}`;
+  }
+  return content.slice(0, 280);
+}
+
+// Cloud Run image ships without the Python/ADK runtime, so the hosted demo
+// replays the same governance mission through the built-in analyzer instead.
+// It creates REAL approvals whose actions execute against the live Fivetran
+// API when a judge approves them.
+async function runReplayMission(response) {
+  const { randomUUID } = require("node:crypto");
+  const runId = randomUUID();
+  missionRunning = true;
+
+  events.publish("agent_mission_started", {
+    runId,
+    message: `Conductor governance mission started (run ${runId.slice(0, 8)}…).`
+  });
+  response.json({ started: true, runId, mode: "replay" });
+
+  const queue = [];
+  let draining = false;
+  const drain = () => {
+    if (draining) return;
+    draining = true;
+    const tick = () => {
+      const step = queue.shift();
+      if (!step) {
+        draining = false;
+        return;
+      }
+      events.publish("agent_mission_step", step);
+      setTimeout(tick, 850);
+    };
+    tick();
+  };
+
+  try {
+    const results = await analyzeConnections(null, {
+      runId,
+      onStep: (step) => {
+        queue.push({
+          runId,
+          agent: MISSION_AGENT_LABELS[step.subAgent] || "conductor",
+          message: formatMissionStep(step)
+        });
+        drain();
+      }
+    });
+
+    const finish = () => {
+      if (queue.length > 0 || draining) {
+        setTimeout(finish, 500);
+        return;
+      }
+      missionRunning = false;
+      events.publish("agent_mission_complete", {
+        runId,
+        exitCode: 0,
+        message: `Mission finished: ${results.length} proposal(s) queued for approval. Trace ${runId.slice(0, 8)}… is available in Activity.`
+      });
+    };
+    finish();
+  } catch (error) {
+    missionRunning = false;
+    console.error("Replay mission failed", error.message);
+    events.publish("agent_mission_complete", {
+      runId,
+      exitCode: 1,
+      message: `Mission failed: ${error.message}`
+    });
+  }
+}
+
 app.post("/internal/run-mission", requireInternalSecret, asyncHandler(async (request, response) => {
   if (missionRunning) {
     response.status(409).json({ error: "An agent mission is already running." });
+    return;
+  }
+
+  const useReplay = Boolean(process.env.K_SERVICE) || process.env.MISSION_MODE === "replay";
+  if (useReplay) {
+    await runReplayMission(response);
     return;
   }
 
@@ -1134,6 +1227,7 @@ app.post("/internal/run-mission", requireInternalSecret, asyncHandler(async (req
 
   let runId = null;
   let stdoutBuffer = "";
+  let lineBuffer = "";
   let responded = false;
 
   const respondStarted = () => {
@@ -1144,7 +1238,8 @@ app.post("/internal/run-mission", requireInternalSecret, asyncHandler(async (req
   };
 
   child.stdout.on("data", (chunk) => {
-    stdoutBuffer += chunk.toString();
+    const text = chunk.toString();
+    stdoutBuffer += text;
     const match = stdoutBuffer.match(/\[run\] ([0-9a-f-]{36})/);
     if (match && !runId) {
       runId = match[1];
@@ -1153,6 +1248,20 @@ app.post("/internal/run-mission", requireInternalSecret, asyncHandler(async (req
         message: `ADK multi-agent mission started (run ${runId.slice(0, 8)}…).`
       });
       respondStarted();
+    }
+
+    // Stream each agent step line to the UI in real time via SSE.
+    lineBuffer += text;
+    const lines = lineBuffer.split(/\r?\n/);
+    lineBuffer = lines.pop();
+    for (const line of lines) {
+      const step = line.match(/^\[([\w-]+)\] (.+)$/);
+      if (!step || step[1] === "run" || step[1] === "trace") continue;
+      events.publish("agent_mission_step", {
+        runId,
+        agent: step[1],
+        message: step[2].slice(0, 280)
+      });
     }
   });
   child.stderr.on("data", () => {});

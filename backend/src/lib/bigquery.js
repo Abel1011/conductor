@@ -40,7 +40,7 @@ async function runQuery(query, params = {}, options = {}) {
     useLegacySql: false
   });
 
-  return rows;
+  return rows.map(normalizeBqRow);
 }
 
 async function safeSelect(query, params = {}, options = {}) {
@@ -58,6 +58,25 @@ async function safeSelect(query, params = {}, options = {}) {
 
     throw error;
   }
+}
+
+// BigQuery returns TIMESTAMP/DATE/DATETIME/NUMERIC as {value:"..."} objects.
+// This helper normalizes them to plain primitives so the JSON sent to the
+// frontend is always a string or number, never a {value} object.
+function normalizeBqRow(row) {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return row;
+  const out = {};
+  for (const [k, v] of Object.entries(row)) {
+    if (v !== null && typeof v === "object" && !Array.isArray(v) && Object.prototype.hasOwnProperty.call(v, "value")) {
+      // BigQuery typed value wrapper — extract the primitive
+      out[k] = v.value ?? null;
+    } else if (Array.isArray(v)) {
+      out[k] = v.map((item) => (item !== null && typeof item === "object" && Object.prototype.hasOwnProperty.call(item, "value") ? (item.value ?? null) : item));
+    } else {
+      out[k] = v;
+    }
+  }
+  return out;
 }
 
 function parseJsonField(value) {
@@ -759,7 +778,8 @@ async function getMarByConnection() {
     FROM ${tablePath(config.fivetranMetadataDataset, "incremental_mar")} AS mar
     JOIN ${tablePath(config.fivetranMetadataDataset, "connection")} AS conn
       ON conn.connection_name = mar.connection_name
-    WHERE COALESCE(mar.free_type, 'PAID') != 'SYSTEM'
+    WHERE COALESCE(conn._fivetran_deleted, FALSE) = FALSE
+      AND COALESCE(mar.free_type, 'PAID') != 'SYSTEM'
       AND DATE_TRUNC(mar.measured_date, MONTH) = DATE_TRUNC(CURRENT_DATE(), MONTH)
     GROUP BY connectionId, connectionName, schemaName, tableName
     ORDER BY monthlyMar DESC
@@ -775,7 +795,8 @@ async function getMarHistoryByConnection() {
     FROM ${tablePath(config.fivetranMetadataDataset, "incremental_mar")} AS mar
     JOIN ${tablePath(config.fivetranMetadataDataset, "connection")} AS conn
       ON conn.connection_name = mar.connection_name
-    WHERE COALESCE(mar.free_type, 'PAID') != 'SYSTEM'
+    WHERE COALESCE(conn._fivetran_deleted, FALSE) = FALSE
+      AND COALESCE(mar.free_type, 'PAID') != 'SYSTEM'
     GROUP BY connectionId, measuredMonth
     ORDER BY measuredMonth ASC
   `, {}, { location: config.fivetranMetadataLocation });
