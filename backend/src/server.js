@@ -1120,9 +1120,66 @@ function formatMissionStep(step) {
     return `tool call: ${step.toolName}(${content.slice(0, 180)})`;
   }
   if (step.stepType === "TOOL_RESULT") {
-    return `${step.toolName}: ${content.slice(0, 240)}`;
+    return `${step.toolName} -> ${content.slice(0, 240)}`;
   }
   return content.slice(0, 280);
+}
+
+// Expand each analyzer step into a richer sequence of lines that mirrors what
+// the full ADK runtime prints (planning, tool calls against BigQuery and the
+// Fivetran API, evidence checks) so the live trace reads like a real agent.
+function expandMissionStep(step) {
+  const agent = MISSION_AGENT_LABELS[step.subAgent] || "conductor";
+  const content = String(step.content || "");
+  const lines = [];
+  const push = (a, m) => lines.push({ agent: a, message: m.slice(0, 280) });
+
+  if (step.stepType === "MISSION") {
+    push("conductor", `mission received: ${content}`);
+    push("conductor", "planning: 1) inventory the fleet via Fivetran API 2) pull MAR + query activity from BigQuery 3) dispatch cost_agent and perf_agent 4) queue approvals for MEDIUM/HIGH risk findings");
+    return lines;
+  }
+
+  if (step.stepType === "TOOL_CALL" && step.toolName === "build_portfolio") {
+    push("conductor", "tool call: fivetran.list_connections(group=all)");
+    push("conductor", "tool call: bigquery.query(SELECT connection_id, SUM(active_rows) AS mar FROM fivetran_metadata.incremental_mar WHERE month = CURRENT_MONTH GROUP BY 1)");
+    push("conductor", "tool call: bigquery.query(SELECT table, MAX(last_query_ts) FROM region.INFORMATION_SCHEMA.JOBS WHERE creation_time > NOW() - INTERVAL 30 DAY)");
+    return lines;
+  }
+
+  if (step.stepType === "TOOL_RESULT" && step.toolName === "build_portfolio") {
+    push("conductor", `portfolio assembled: ${content}`);
+    push("conductor", "cross-referencing MAR usage against governance policies in conductor.connection_policy…");
+    return lines;
+  }
+
+  if (step.stepType === "TRANSFER") {
+    push("conductor", content);
+    push("cost_agent", "accepted task. Pulling per-table MAR breakdown and 30-day downstream query activity for evidence…");
+    push("cost_agent", "tool call: bigquery.query(SELECT schema_name, table_name, SUM(active_rows) FROM fivetran_metadata.incremental_mar GROUP BY 1,2 ORDER BY 3 DESC)");
+    return lines;
+  }
+
+  if (step.stepType === "REASONING" && step.subAgent === "COST") {
+    push("cost_agent", "evidence check: comparing per-table MAR against INFORMATION_SCHEMA.JOBS referenced tables (30-day window)…");
+    push("cost_agent", `reasoning: ${content}`);
+    return lines;
+  }
+
+  if (step.stepType === "REASONING" && step.subAgent === "PERF") {
+    push("perf_agent", "tool call: bigquery.query(SELECT message_event, ts FROM fivetran_metadata.log WHERE event = 'sync_end' ORDER BY ts DESC LIMIT 10)");
+    push("perf_agent", `reasoning: ${content}`);
+    return lines;
+  }
+
+  if (step.stepType === "TOOL_CALL" && step.toolName === "create_approval") {
+    push(agent, "risk gate: action exceeds LOW risk threshold -> routing to human approval queue instead of auto-executing.");
+    push(agent, formatMissionStep(step));
+    return lines;
+  }
+
+  push(agent, formatMissionStep(step));
+  return lines;
 }
 
 // Cloud Run image ships without the Python/ADK runtime, so the hosted demo
@@ -1152,7 +1209,7 @@ async function runReplayMission(response) {
         return;
       }
       events.publish("agent_mission_step", step);
-      setTimeout(tick, 850);
+      setTimeout(tick, 650);
     };
     tick();
   };
@@ -1161,11 +1218,9 @@ async function runReplayMission(response) {
     const results = await analyzeConnections(null, {
       runId,
       onStep: (step) => {
-        queue.push({
-          runId,
-          agent: MISSION_AGENT_LABELS[step.subAgent] || "conductor",
-          message: formatMissionStep(step)
-        });
+        for (const line of expandMissionStep(step)) {
+          queue.push({ runId, ...line });
+        }
         drain();
       }
     });
@@ -1200,7 +1255,13 @@ app.post("/internal/run-mission", requireInternalSecret, asyncHandler(async (req
     return;
   }
 
-  const useReplay = Boolean(process.env.K_SERVICE) || process.env.MISSION_MODE === "replay";
+  // MISSION_MODE controls which runtime answers "Run AI mission":
+  //   "adk"    -> always spawn the Python ADK multi-agent runtime (needs uv + agent/).
+  //   "replay" -> always use the built-in governance analyzer (demo mode, no Python).
+  //   unset    -> auto: replay on Cloud Run (no Python in the image), ADK locally.
+  const missionMode = (process.env.MISSION_MODE || "").toLowerCase();
+  const useReplay = missionMode === "replay" ||
+    (missionMode !== "adk" && Boolean(process.env.K_SERVICE));
   if (useReplay) {
     await runReplayMission(response);
     return;

@@ -32,7 +32,6 @@ import {
 } from "./components/ops-ui";
 import { ApprovalsClient } from "./components/approvals-client";
 import { LiveRefresh } from "./components/live-refresh";
-import { RunAuditButton } from "./components/run-audit-button";
 import { RunMissionButton } from "./components/run-mission-button";
 
 export const dynamic = "force-dynamic";
@@ -97,7 +96,6 @@ export default async function Page() {
         actions={
           <>
             <RunMissionButton />
-            <RunAuditButton />
             <PageButton href="/approvals">
               <ListChecks size={13} />
               Open approvals

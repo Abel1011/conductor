@@ -127,6 +127,31 @@ uv run python smoke_agent.py "Run a full fleet audit: cost waste (cold tables, o
 
 The mission produces pending approvals in the UI (`/approvals`), each with its agent trace. Approve one and watch the action execute against the real Fivetran API.
 
+#### Mission modes (demo vs ADK)
+
+The **Run AI mission** button in the UI supports two interchangeable runtimes, selected with the `MISSION_MODE` env var on the backend:
+
+| `MISSION_MODE` | Behavior |
+| --- | --- |
+| _unset_ (default) | **Auto**: uses the Python ADK multi-agent runtime locally, and switches to replay mode automatically on Cloud Run (where the Python runtime is not in the image). |
+| `adk` | Always spawns the full Gemini + ADK multi-agent runtime (requires Python 3.12+, `uv`, and the `agent/` folder). |
+| `replay` | Demo mode: runs the built-in governance analyzer and streams its trace step by step to the UI. No Python required. |
+
+Both modes are fully live: they analyze the real Fivetran portfolio, create real approvals in BigQuery, and approved actions execute against the real Fivetran API. Replay mode exists so the hosted demo works end-to-end without the Python runtime.
+
+```bash
+# force demo mode locally
+MISSION_MODE=replay node src/server.js
+
+# force the ADK runtime (e.g. on a server that has uv installed)
+MISSION_MODE=adk node src/server.js
+
+# toggle it on an existing Cloud Run service
+gcloud run services update conductor-backend --region us-central1 --set-env-vars MISSION_MODE=replay
+# back to auto
+gcloud run services update conductor-backend --region us-central1 --remove-env-vars MISSION_MODE
+```
+
 ### 4. The gate (optional, needs a public endpoint)
 
 Deploy the backend to Cloud Run, register a Fivetran account webhook for `create_connector`, set governance mode to **ENFORCE** in Settings — then create any connector in Fivetran and watch it get paused and queued for review before a single row syncs.

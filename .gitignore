@@ -24,6 +24,7 @@ __pycache__/
 # Logs & scratch
 mission-log.txt
 *.log
+.playwright-mcp
 
 # OS / editor
 .DS_Store

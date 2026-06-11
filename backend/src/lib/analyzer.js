@@ -6,8 +6,11 @@ const { executeAction } = require("./actions");
 
 const ALLOWED_FREQUENCIES = [5, 15, 30, 60, 120, 180, 360, 480, 720, 1440];
 
-function buildEquivalentKey(connectionId, actionType, payload) {
-  return `${connectionId}:${actionType}:${JSON.stringify(payload || {})}`;
+function buildEquivalentKey(connectionId, actionType) {
+  // Dedup by connection + action type: payloads vary slightly between runs
+  // (timestamps, recomputed MAR figures), but a pending PAUSE on a connector
+  // is still the same pending PAUSE.
+  return `${connectionId}:${actionType}`;
 }
 
 function nextSlowerFrequency(connection) {
@@ -115,13 +118,21 @@ async function createProposal(connection, proposal, pendingKeys, run) {
   return { actionId, approvalId };
 }
 
-async function analyzeConnections(targetConnectionId = null) {
-  const runId = randomUUID();
+async function analyzeConnections(targetConnectionId = null, { runId: providedRunId = null, onStep = null } = {}) {
+  const runId = providedRunId || randomUUID();
   const traceSteps = [];
   const run = {
     runId,
     trace(step) {
-      traceSteps.push({ seq: traceSteps.length, ts: new Date().toISOString(), ...step });
+      const fullStep = { seq: traceSteps.length, ts: new Date().toISOString(), ...step };
+      traceSteps.push(fullStep);
+      if (onStep) {
+        try {
+          onStep(fullStep);
+        } catch {
+          // Streaming is best effort; never break the analysis.
+        }
+      }
     }
   };
 
