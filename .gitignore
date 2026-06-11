@@ -1,0 +1,32 @@
+# Local-only assets
+.local/
+
+# Secrets & env
+.env
+.env.*
+!.env.example
+*.pem
+*-key.json
+
+# Node
+node_modules/
+.next/
+out/
+dist/
+npm-debug.log*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Logs & scratch
+mission-log.txt
+*.log
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,11 @@
+[project]
+name = "conductor-agent"
+version = "0.1.0"
+description = "Conductor Operator - ADK agent governing a Fivetran fleet via MCP + Conductor backend tools"
+requires-python = ">=3.10"
+dependencies = [
+    "google-adk>=1.6.0",
+    "python-dotenv>=1.0.0",
+    "httpx>=0.27.0",
+    "mcp>=1.27.2",
+]
